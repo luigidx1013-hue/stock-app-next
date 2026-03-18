@@ -1,9 +1,12 @@
+import { Suspense } from "react";
 import AnalyzerClient from "@/components/AnalyzerClient";
 
 export default function AnalyzerPage() {
   return (
     <div className="container">
-      <AnalyzerClient />
+      <Suspense fallback={<div>Loading analyzer...</div>}>
+        <AnalyzerClient />
+      </Suspense>
     </div>
   );
 }

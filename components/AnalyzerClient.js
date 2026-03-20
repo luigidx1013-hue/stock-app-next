@@ -253,7 +253,7 @@ export default function AnalyzerClient() {
             value={ticker}
             onChange={(e) => setTicker(e.target.value.toUpperCase())}
             onKeyDown={(e) => e.key === "Enter" && runAnalysis(ticker)}
-            placeholder="Enter ticker (AAPL, NVDA, SPY, QQQ)"
+            placeholder="Enter ticker (AAPL, JPM, SPY, QQQ)"
           />
           <button onClick={() => runAnalysis(ticker)} disabled={loading}>
             {loading ? "Analyzing..." : "Analyze Ticker"}

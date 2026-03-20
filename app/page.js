@@ -131,7 +131,7 @@ export default function HomePage() {
             }}
           >
             Make predictions on where stocks are going, get scored based on real
-            outcomes, and compete on accuracy through a live leaderboard.
+            outcomes, and compete on accuracy through a live leaderboard
           </p>
 
           <div

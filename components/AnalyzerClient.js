@@ -82,7 +82,7 @@ function FactRows({ rows, formatter = (x) => x }) {
 export default function AnalyzerClient() {
   const searchParams = useSearchParams();
 
-  const [ticker, setTicker] = useState(searchParams.get("ticker") || "AAPL");
+  const [ticker, setTicker] = useState(searchParams.get("ticker") || "");
   const [status, setStatus] = useState("Ready.");
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState(null);
@@ -248,7 +248,7 @@ export default function AnalyzerClient() {
             value={ticker}
             onChange={(e) => setTicker(e.target.value.toUpperCase())}
             onKeyDown={(e) => e.key === "Enter" && runAnalysis(ticker)}
-            placeholder="Enter ticker (AAPL, MSFT, NVDA)"
+            placeholder="Enter ticker (AAPL, JPM, NVDA)"
           />
           <button onClick={() => runAnalysis(ticker)} disabled={loading}>
             {loading ? "Analyzing..." : "Analyze Stock"}

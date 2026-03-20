@@ -114,13 +114,12 @@ function findStartingClose(rows, submittedAt) {
 export async function GET(request) {
   try {
     const url = new URL(request.url);
-    const queryKey = url.searchParams.get("key");
     const headerKey = request.headers.get("x-cron-secret");
-    const expectedKey = process.env.CRON_SECRET;
+const expectedKey = process.env.CRON_SECRET;
 
-    if (!expectedKey || (queryKey !== expectedKey && headerKey !== expectedKey)) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+if (!expectedKey || headerKey !== expectedKey) {
+  return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+}
 
     const supabase = createAdminClient();
     const today = new Date().toISOString().slice(0, 10);

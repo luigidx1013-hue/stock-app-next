@@ -30,7 +30,7 @@ export default function Sidebar() {
       <div className="brand">
         <div className="logo">📈</div>
         <div>
-          <div className="brand-title">Stock Projection</div>
+          <div className="brand-title">Market Arena</div>
           <div className="brand-sub">Predict. Compete. Win.</div>
         </div>
       </div>

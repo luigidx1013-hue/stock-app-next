@@ -69,11 +69,7 @@ const highlights = [
   },
 ];
 
-export default async function HomePage() {
-  // Replace this with the same top-3 rows your leaderboard page already uses.
-  // If you already have a helper/query there, import and reuse it here.
-  const topLeaders = [];
-
+export default function HomePage() {
   return (
     <main
       style={{

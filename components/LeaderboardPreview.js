@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
 
 function getCurrentLeaderboardMonth() {
   const now = new Date();
@@ -19,7 +18,6 @@ function medalFor(rank) {
 }
 
 export default function LeaderboardPreview() {
-  const supabase = createClient();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -29,80 +27,32 @@ export default function LeaderboardPreview() {
     async function loadLeaderboardPreview() {
       setLoading(true);
 
-      const { data, error } = await supabase
-        .from("predictions")
-        .select(
-          "user_id, display_name, accuracy_score, direction_correct, status, leaderboard_month"
-        )
-        .eq("status", "scored")
-        .eq("leaderboard_month", currentMonth)
-        .order("accuracy_score", { ascending: false });
+      try {
+        const res = await fetch(
+          `/api/leaderboard?month=${encodeURIComponent(currentMonth)}`,
+          {
+            method: "GET",
+            cache: "no-store",
+          }
+        );
 
-      if (error) {
+        const payload = await res.json();
+
+        if (!res.ok || !payload.ok) {
+          throw new Error(payload.error || "Failed to load leaderboard preview");
+        }
+
+        setRows((payload.rows || []).slice(0, 3));
+      } catch (error) {
         console.error(error);
         setRows([]);
+      } finally {
         setLoading(false);
-        return;
       }
-
-      const grouped = new Map();
-
-      for (const row of data || []) {
-        const key = row.user_id;
-
-        if (!grouped.has(key)) {
-          grouped.set(key, {
-            user_id: row.user_id,
-            display_name: row.display_name || "Anonymous",
-            predictions_count: 0,
-            total_score: 0,
-            correct_directions: 0,
-            best_score: 0,
-          });
-        }
-
-        const user = grouped.get(key);
-        user.predictions_count += 1;
-        user.total_score += Number(row.accuracy_score || 0);
-
-        if (row.direction_correct === true) {
-          user.correct_directions += 1;
-        }
-
-        user.best_score = Math.max(
-          user.best_score,
-          Number(row.accuracy_score || 0)
-        );
-      }
-
-      const leaderboard = Array.from(grouped.values())
-        .filter((user) => user.predictions_count >= 1)
-        .map((user) => ({
-          ...user,
-          average_score: Number(
-            (user.total_score / user.predictions_count).toFixed(2)
-          ),
-          direction_rate: Number(
-            ((user.correct_directions / user.predictions_count) * 100).toFixed(0)
-          ),
-        }))
-        .sort((a, b) => {
-          if (b.average_score !== a.average_score) {
-            return b.average_score - a.average_score;
-          }
-          if (b.predictions_count !== a.predictions_count) {
-            return b.predictions_count - a.predictions_count;
-          }
-          return b.best_score - a.best_score;
-        })
-        .slice(0, 3);
-
-      setRows(leaderboard);
-      setLoading(false);
     }
 
     loadLeaderboardPreview();
-  }, [supabase, currentMonth]);
+  }, [currentMonth]);
 
   return (
     <section

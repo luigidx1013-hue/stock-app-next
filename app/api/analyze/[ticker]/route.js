@@ -1,812 +1,840 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import PriceChart from "@/components/PriceChart";
+import { createClient } from "@/lib/supabase/client";
 import {
-  buildMonthlyPath,
-  buildScenarioPE,
-  calcCAGR,
-  calcFairValue,
-  normalizeGrowth,
-  projectEPS,
-} from "@/lib/projection";
+  calcReturnPercent,
+  fmtBigNumber,
+  fmtMoney,
+  fmtPercent,
+  sentimentLabel,
+} from "@/lib/format";
 
-const USER_AGENT = "StockProjectionSite/1.0 luigidx1013@gmail.com";
-
-function safeNumber(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
-function mean(arr) {
-  if (!arr.length) return 0;
-  return arr.reduce((a, b) => a + b, 0) / arr.length;
-}
-
-function stdDev(arr) {
-  if (arr.length < 2) return 0;
-  const m = mean(arr);
-  const variance = mean(arr.map((x) => (x - m) ** 2));
-  return Math.sqrt(variance);
-}
-
-function clamp(n, min, max) {
-  return Math.max(min, Math.min(max, n));
-}
-
-function parseCsv(csv) {
-  const lines = csv.trim().split(/\r?\n/);
-  if (lines.length < 2) return [];
-  const headers = lines[0].split(",").map((h) => h.trim());
-
-  return lines.slice(1).map((line) => {
-    const values = line.split(",");
-    const row = {};
-    headers.forEach((h, i) => {
-      row[h] = (values[i] || "").trim();
-    });
-    return row;
-  });
-}
-
-function stripHtml(s) {
-  return s.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
-}
-
-function extractTag(xml, tag) {
-  const regex = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, "gi");
-  const out = [];
-  let match;
-  while ((match = regex.exec(xml)) !== null) out.push(stripHtml(match[1]));
-  return out;
-}
-
-function scoreHeadline(text) {
-  const positive = [
-    "beat",
-    "beats",
-    "surge",
-    "surges",
-    "growth",
-    "strong",
-    "stronger",
-    "record",
-    "bullish",
-    "upgrade",
-    "upgrades",
-    "expands",
-    "expansion",
-    "profit",
-    "profits",
-    "outperform",
-    "outperforms",
-    "win",
-    "wins",
-    "partnership",
-    "launch",
-    "raises",
-    "raised",
-    "improves",
-    "improved",
-  ];
-
-  const negative = [
-    "miss",
-    "misses",
-    "drop",
-    "drops",
-    "fall",
-    "falls",
-    "weak",
-    "weaker",
-    "cut",
-    "cuts",
-    "downgrade",
-    "downgrades",
-    "lawsuit",
-    "probe",
-    "risk",
-    "risks",
-    "decline",
-    "declines",
-    "warning",
-    "warns",
-    "slump",
-    "slumps",
-    "loss",
-    "losses",
-    "recall",
-    "fraud",
-    "delay",
-    "delays",
-  ];
-
-  const words = text.toLowerCase().split(/[^a-z]+/).filter(Boolean);
-  let score = 0;
-
-  for (const w of words) {
-    if (positive.includes(w)) score += 1;
-    if (negative.includes(w)) score -= 1;
-  }
-
-  return score;
-}
-
-function annualizeReturn(totalReturn, years) {
-  if (years <= 0) return 0;
-  if (1 + totalReturn <= 0) return -1;
-  return Math.pow(1 + totalReturn, 1 / years) - 1;
-}
-
-function formatCIK(cik) {
-  return String(cik).padStart(10, "0");
-}
-
-async function fetchText(url, options = {}) {
-  const res = await fetch(url, options);
-  if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
-  return await res.text();
-}
-
-async function fetchJson(url, options = {}) {
-  const res = await fetch(url, options);
-  if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
-  return await res.json();
-}
-
-async function fetchStooqHistory(ticker) {
-  const symbol = `${ticker.toLowerCase()}.us`;
-  const url = `https://stooq.com/q/d/l/?s=${symbol}&i=d`;
-  const csv = await fetchText(url, { headers: { "User-Agent": USER_AGENT } });
-
-  const rows = parseCsv(csv)
-    .map((r) => ({
-      date: r.Date,
-      open: safeNumber(r.Open),
-      high: safeNumber(r.High),
-      low: safeNumber(r.Low),
-      close: safeNumber(r.Close),
-      volume: safeNumber(r.Volume),
-    }))
-    .filter((r) => r.date && r.close !== null);
-
-  if (!rows.length) throw new Error("No Stooq history returned for that ticker.");
-  return rows;
-}
-
-async function fetchTickerMap() {
-  const data = await fetchJson(
-    "https://www.sec.gov/files/company_tickers_exchange.json",
-    {
-      headers: {
-        "User-Agent": USER_AGENT,
-        Accept: "application/json",
-      },
-    }
-  );
-
-  const map = new Map();
-  for (const row of data.data || []) {
-    const [cik, name, ticker, exchange] = row;
-    if (ticker) map.set(String(ticker).toUpperCase(), { cik, name, exchange });
-  }
-  return map;
-}
-
-function getLatestAnnualFacts(factObj) {
-  if (!factObj || !factObj.units) return [];
-
-  const unitKeys = Object.keys(factObj.units);
-  if (!unitKeys.length) return [];
-
-  const entries = factObj.units[unitKeys[0]] || [];
-
-  const annualEntries = entries
-    .filter((x) => {
-      const formOk = x.form === "10-K" || x.form === "10-K/A" || x.fp === "FY";
-      const valueOk = safeNumber(x.val) !== null;
-      const endOk = !!x.end;
-      return formOk && valueOk && endOk;
-    })
-    .map((x) => {
-      const year = Number.isFinite(Number(x.fy))
-        ? Number(x.fy)
-        : new Date(x.end).getFullYear();
-
-      return {
-        fy: year,
-        end: x.end,
-        val: safeNumber(x.val),
-        filed: x.filed || null,
-      };
-    });
-
-  const byYear = new Map();
-
-  for (const row of annualEntries) {
-    const existing = byYear.get(row.fy);
-
-    if (!existing) {
-      byYear.set(row.fy, row);
-      continue;
-    }
-
-    const existingFiled = existing.filed ? new Date(existing.filed).getTime() : 0;
-    const rowFiled = row.filed ? new Date(row.filed).getTime() : 0;
-
-    const existingEnd = existing.end ? new Date(existing.end).getTime() : 0;
-    const rowEnd = row.end ? new Date(row.end).getTime() : 0;
-
-    if (
-      rowFiled > existingFiled ||
-      (rowFiled === existingFiled && rowEnd > existingEnd)
-    ) {
-      byYear.set(row.fy, row);
-    }
-  }
-
-  return Array.from(byYear.values()).sort(
-    (a, b) => new Date(a.end) - new Date(b.end)
+function InfoTooltip({ text }) {
+  return (
+    <span
+      title={text}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: "16px",
+        height: "16px",
+        marginLeft: "6px",
+        borderRadius: "999px",
+        background: "rgba(148, 163, 184, 0.18)",
+        color: "#cbd5e1",
+        fontSize: "11px",
+        fontWeight: 700,
+        cursor: "help",
+        verticalAlign: "middle",
+      }}
+    >
+      i
+    </span>
   );
 }
 
-function pickFact(facts, namespace, names) {
-  const ns = facts?.[namespace];
-  if (!ns) return null;
-  for (const name of names) {
-    if (ns[name]) return ns[name];
-  }
-  return null;
-}
-
-async function fetchSecFundamentals(ticker) {
-  const map = await fetchTickerMap();
-  const item = map.get(String(ticker).toUpperCase());
-  if (!item) throw new Error("Ticker not found in SEC mapping.");
-
-  const cikPadded = formatCIK(item.cik);
-  const companyFacts = await fetchJson(
-    `https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`,
-    {
-      headers: {
-        "User-Agent": USER_AGENT,
-        Accept: "application/json",
-      },
-    }
-  );
-
-  const facts = companyFacts.facts || {};
-  const revenueFact = pickFact(facts, "us-gaap", [
-    "RevenueFromContractWithCustomerExcludingAssessedTax",
-    "Revenues",
-    "SalesRevenueNet",
-  ]);
-  const netIncomeFact = pickFact(facts, "us-gaap", ["NetIncomeLoss", "ProfitLoss"]);
-  const epsFact = pickFact(facts, "us-gaap", [
-    "EarningsPerShareDiluted",
-    "EarningsPerShareBasic",
-  ]);
-
-  return {
-    companyName: item.name,
-    exchange: item.exchange,
-    cik: cikPadded,
-    revenue: getLatestAnnualFacts(revenueFact),
-    netIncome: getLatestAnnualFacts(netIncomeFact),
-    eps: getLatestAnnualFacts(epsFact),
-  };
-}
-
-async function fetchNews(ticker, companyName = "") {
-  const query = encodeURIComponent(`${ticker} ${companyName}`.trim());
-  const xml = await fetchText(
-    `https://news.google.com/rss/search?q=${query}&hl=en-US&gl=US&ceid=US:en`,
-    {
-      headers: { "User-Agent": USER_AGENT },
-    }
-  );
-
-  const titles = extractTag(xml, "title").slice(1);
-  const links = extractTag(xml, "link").slice(1);
-  const pubDates = extractTag(xml, "pubDate").slice(1);
-
-  const items = [];
-  const limit = Math.min(titles.length, links.length, pubDates.length, 12);
-
-  for (let i = 0; i < limit; i++) {
-    items.push({
-      title: titles[i],
-      link: links[i],
-      pubDate: pubDates[i],
-      sentimentScore: scoreHeadline(titles[i]),
-    });
-  }
-
-  return items;
-}
-
-function estimateForwardEPS({ latestPrice, forwardPE, recentEps }) {
-  const price = safeNumber(latestPrice);
-  const pe = safeNumber(forwardPE);
-  const impliedEPS = price != null && pe != null && pe > 0 ? price / pe : null;
-
-  if (recentEps != null && recentEps > 0) {
-    if (price != null) {
-      const impliedTrailingPE = price / recentEps;
-      if (impliedTrailingPE > 0 && impliedTrailingPE <= 120) {
-        return recentEps;
-      }
-    } else {
-      return recentEps;
-    }
-  }
-
-  return impliedEPS;
-}
-
-function getRecentPositiveSeries(series, count = 3) {
-  return (series || [])
-    .filter((x) => x?.val != null && x.val > 0)
-    .slice(-count);
-}
-
-function getRecentSeries(series, count = 3) {
-  return (series || [])
-    .filter((x) => x?.val != null)
-    .slice(-count);
-}
-
-function buildProjectionBands({ monthlyPath, latestPrice, volatility }) {
-  const vol = clamp(safeNumber(volatility) ?? 0.25, 0.05, 1.0);
-  const bandScale = 0.18;
-
-  return monthlyPath.map((point, index) => {
-    const t = index + 1;
-    const width = latestPrice * vol * Math.sqrt(t / 12) * bandScale;
-
-    return {
-      month: point.month,
-      base: point.price,
-      low: Number(Math.max(0, point.price - width).toFixed(2)),
-      high: Number((point.price + width).toFixed(2)),
-    };
-  });
-}
-
-function projectScenarioPrices({
-  ticker,
-  latestPrice,
-  recentEps,
-  forwardPE,
-  annualDrift,
-  volatility,
-  epsGrowth,
-  revenueGrowth,
-  avgNewsSentiment,
-  years = 5,
-}) {
-  const forwardEPS = estimateForwardEPS({
-    latestPrice,
-    forwardPE,
-    recentEps,
-  });
-
-  if (!forwardEPS || forwardEPS <= 0) {
-    return {
-      forwardEPS: null,
-      normalizedGrowth: null,
-      scenarioPEs: null,
-      scenarioGrowths: null,
-      projections: [],
-      monthlyPath: [],
-      fairValues: null,
-      projectionBands: [],
-    };
-  }
-
-  const normalizedGrowthRate = normalizeGrowth({
-    epsCagr: epsGrowth,
-    revenueCagr: revenueGrowth,
-    sentimentScore: avgNewsSentiment,
-  });
-
-  const projectedEPSByYear = [];
-  for (let year = 1; year <= years; year += 1) {
-    projectedEPSByYear.push(projectEPS(forwardEPS, normalizedGrowthRate, year));
-  }
-
-  const scenarioPE = buildScenarioPE(forwardPE);
-
-  const projections = projectedEPSByYear.map((eps, index) => {
-    const year = index + 1;
-
-    const bearPrice = calcFairValue(eps, scenarioPE.bear);
-    const basePrice = calcFairValue(eps, scenarioPE.base);
-    const bullPrice = calcFairValue(eps, scenarioPE.bull);
-
-    return {
-      year,
-      projectedBearEPS: eps ? Number(eps.toFixed(2)) : null,
-      projectedBaseEPS: eps ? Number(eps.toFixed(2)) : null,
-      projectedBullEPS: eps ? Number(eps.toFixed(2)) : null,
-      bearPrice: bearPrice ? Number(bearPrice.toFixed(2)) : null,
-      blendedPrice: basePrice ? Number(basePrice.toFixed(2)) : null,
-      bullPrice: bullPrice ? Number(bullPrice.toFixed(2)) : null,
-    };
-  });
-
-  const oneYearEPS = projectEPS(forwardEPS, normalizedGrowthRate, 1);
-  const bearFairValue = oneYearEPS ? calcFairValue(oneYearEPS, scenarioPE.bear) : null;
-  const baseFairValue = oneYearEPS ? calcFairValue(oneYearEPS, scenarioPE.base) : null;
-  const bullFairValue = oneYearEPS ? calcFairValue(oneYearEPS, scenarioPE.bull) : null;
-
-  const fairValues =
-    bearFairValue != null && baseFairValue != null && bullFairValue != null
-      ? {
-          bear: Number(bearFairValue.toFixed(2)),
-          base: Number(baseFairValue.toFixed(2)),
-          bull: Number(bullFairValue.toFixed(2)),
-        }
-      : null;
-
-  const monthlyPath = fairValues?.base
-    ? buildMonthlyPath({
-        ticker,
-        currentPrice: latestPrice,
-        targetPrice: fairValues.base,
-        months: 12,
-        annualDrift,
-        annualVolatility: volatility,
-        meanReversionStrength: 0.35,
-      }).map((point) => ({
-        month: point.month,
-        price: Number(point.price.toFixed(2)),
-      }))
-    : [];
-
-  const projectionBands = buildProjectionBands({
-    monthlyPath,
-    latestPrice,
-    volatility,
-  });
-
-  const uncertainty = clamp(volatility * 0.35, 0.03, 0.1);
-
-  return {
-    forwardEPS: Number(forwardEPS.toFixed(2)),
-    normalizedGrowth: Number((normalizedGrowthRate * 100).toFixed(2)),
-    scenarioPEs: {
-      bearPE: Number(scenarioPE.bear.toFixed(2)),
-      basePE: Number(scenarioPE.base.toFixed(2)),
-      bullPE: Number(scenarioPE.bull.toFixed(2)),
-    },
-    scenarioGrowths: {
-      bearGrowth: Number(((normalizedGrowthRate - uncertainty) * 100).toFixed(2)),
-      baseGrowth: Number((normalizedGrowthRate * 100).toFixed(2)),
-      bullGrowth: Number(((normalizedGrowthRate + uncertainty) * 100).toFixed(2)),
-    },
-    fairValues,
-    projections,
-    monthlyPath,
-    projectionBands,
-  };
-}
-
-function getPriceStats(prices, news = []) {
-  const closes = prices.map((p) => p.close).filter((x) => x !== null);
-  if (closes.length < 200) throw new Error("Not enough price history.");
-
-  const latestPrice = closes[closes.length - 1];
-  const oneYearAgoPrice = closes[Math.max(0, closes.length - 252)] || closes[0];
-  const threeYearsAgoIndex = Math.max(0, closes.length - 252 * 3);
-  const threeYearsAgoPrice = closes[threeYearsAgoIndex] || closes[0];
-
-  const dailyReturns = [];
-  for (let i = 1; i < closes.length; i++) {
-    if (closes[i - 1] > 0) {
-      dailyReturns.push(closes[i] / closes[i - 1] - 1);
-    }
-  }
-
-  const annualVol = stdDev(dailyReturns) * Math.sqrt(252);
-  const oneYearReturn = latestPrice / oneYearAgoPrice - 1;
-  const threeYearTotalReturn = latestPrice / threeYearsAgoPrice - 1;
-  const threeYearCagr = annualizeReturn(threeYearTotalReturn, 3);
-
-  const ma50 = mean(closes.slice(-50));
-  const ma200 = mean(closes.slice(-200));
-  const trendSignal = ma200 > 0 ? ma50 / ma200 - 1 : 0;
-
-  const newsScores = news.map((n) => n.sentimentScore);
-  const avgNewsSentiment = newsScores.length ? mean(newsScores) : 0;
-  const newsAdjustment = clamp(avgNewsSentiment * 0.01, -0.03, 0.03);
-
-  let annualDrift =
-    threeYearCagr * 0.4 +
-    clamp(oneYearReturn, -0.3, 0.3) * 0.25 +
-    clamp(trendSignal * 2, -0.15, 0.15) * 0.2 +
-    newsAdjustment * 0.15;
-
-  annualDrift -= clamp((annualVol - 0.25) * 0.25, 0, 0.1);
-  annualDrift = clamp(annualDrift, -0.12, 0.22);
-
-  return {
-    closes,
-    latestPrice,
-    oneYearReturn,
-    threeYearCagr,
-    annualVol,
-    ma50,
-    ma200,
-    trendSignal,
-    avgNewsSentiment,
-    newsAdjustment,
-    annualDrift,
-  };
-}
-
-function buildProjection({ ticker, prices, fundamentals, news }) {
-  const stats = getPriceStats(prices, news);
-
-  const epsSeries = (fundamentals.eps || []).filter((x) => x.val !== null);
-  const recentEps = epsSeries.length ? epsSeries[epsSeries.length - 1].val : null;
-
-  const recentPositiveEpsSeries = getRecentPositiveSeries(epsSeries, 3);
-
-  let epsGrowth = 0.08;
-  if (recentPositiveEpsSeries.length >= 2) {
-    const start = recentPositiveEpsSeries[0]?.val;
-    const end = recentPositiveEpsSeries[recentPositiveEpsSeries.length - 1]?.val;
-    const years = recentPositiveEpsSeries.length - 1;
-
-    if (start > 0 && end > 0 && years > 0) {
-      epsGrowth = calcCAGR(start, end, years);
-    } else {
-      const priorEps =
-        recentPositiveEpsSeries[recentPositiveEpsSeries.length - 2]?.val;
-      if (recentEps !== null && priorEps !== null && Math.abs(priorEps) > 0.0001) {
-        epsGrowth = recentEps / priorEps - 1;
-      }
-    }
-  }
-  epsGrowth = clamp(epsGrowth, -0.2, 0.3);
-
-  const revenueSeries = (fundamentals.revenue || []).filter((x) => x.val !== null);
-  const recentRevenueSeries = getRecentSeries(revenueSeries, 3);
-
-  let revenueGrowth = 0.06;
-  if (recentRevenueSeries.length >= 2) {
-    const startRevenue = recentRevenueSeries[0]?.val;
-    const endRevenue = recentRevenueSeries[recentRevenueSeries.length - 1]?.val;
-    const years = recentRevenueSeries.length - 1;
-
-    if (startRevenue > 0 && endRevenue > 0 && years > 0) {
-      revenueGrowth = calcCAGR(startRevenue, endRevenue, years);
-    } else {
-      const prevRevenue = recentRevenueSeries[recentRevenueSeries.length - 2]?.val;
-      const lastRevenue = recentRevenueSeries[recentRevenueSeries.length - 1]?.val;
-      if (prevRevenue > 0 && lastRevenue > 0) {
-        revenueGrowth = lastRevenue / prevRevenue - 1;
-      }
-    }
-  }
-  revenueGrowth = clamp(revenueGrowth, -0.15, 0.25);
-
-  let trailingPE = null;
-  if (recentEps && recentEps > 0) {
-    trailingPE = stats.latestPrice / recentEps;
-  }
-
-  let forwardPE = trailingPE;
-  if (!forwardPE || !Number.isFinite(forwardPE) || forwardPE <= 0) {
-    forwardPE = 18;
-  }
-
-  forwardPE = clamp(forwardPE, 8, 35);
-  forwardPE *= 1 + clamp(stats.newsAdjustment + stats.trendSignal * 0.2, -0.1, 0.1);
-  forwardPE = clamp(forwardPE, 8, 38);
-
-  const scenarioModel = projectScenarioPrices({
-    ticker,
-    latestPrice: stats.latestPrice,
-    recentEps,
-    forwardPE,
-    annualDrift: stats.annualDrift,
-    volatility: stats.annualVol,
-    epsGrowth,
-    revenueGrowth,
-    avgNewsSentiment: stats.avgNewsSentiment,
-    years: 5,
-  });
-
-  return {
-    assetType: "stock",
-    latestPrice: Number(stats.latestPrice.toFixed(2)),
-    ma50: Number(stats.ma50.toFixed(2)),
-    ma200: Number(stats.ma200.toFixed(2)),
-    oneYearReturn: Number((stats.oneYearReturn * 100).toFixed(2)),
-    threeYearCagr: Number((stats.threeYearCagr * 100).toFixed(2)),
-    annualVol: Number((stats.annualVol * 100).toFixed(2)),
-    annualDrift: Number((stats.annualDrift * 100).toFixed(2)),
-    trailingPE: trailingPE ? Number(trailingPE.toFixed(2)) : null,
-    forwardPE: Number(forwardPE.toFixed(2)),
-    epsGrowth: Number((epsGrowth * 100).toFixed(2)),
-    revenueGrowth: Number((revenueGrowth * 100).toFixed(2)),
-    avgNewsSentiment: Number(stats.avgNewsSentiment.toFixed(2)),
-    assumptions: {
-      modelType: "fundamental",
-      forwardEPS: scenarioModel.forwardEPS,
-      normalizedGrowth: scenarioModel.normalizedGrowth,
-      scenarioGrowths: scenarioModel.scenarioGrowths,
-      scenarioPEs: scenarioModel.scenarioPEs,
-      fairValues: scenarioModel.fairValues,
-    },
-    projections: scenarioModel.projections,
-    monthlyPath: scenarioModel.monthlyPath,
-    projectionBands: scenarioModel.projectionBands,
-  };
-}
-
-function buildEtfProjection({ ticker, prices, news }) {
-  const stats = getPriceStats(prices, news);
-
-  const regimeBoost = clamp(stats.trendSignal * 0.6, -0.05, 0.05);
-  const sentimentBoost = clamp(stats.avgNewsSentiment * 0.006, -0.02, 0.02);
-
-  const baseDrift = clamp(
-    stats.threeYearCagr * 0.55 +
-      stats.oneYearReturn * 0.2 +
-      regimeBoost +
-      sentimentBoost,
-    -0.1,
-    0.18
-  );
-
-  const bearDrift = clamp(baseDrift - Math.max(0.04, stats.annualVol * 0.35), -0.18, 0.12);
-  const bullDrift = clamp(baseDrift + Math.max(0.04, stats.annualVol * 0.3), -0.02, 0.24);
-
-  const bearTarget = stats.latestPrice * (1 + bearDrift);
-  const baseTarget = stats.latestPrice * (1 + baseDrift);
-  const bullTarget = stats.latestPrice * (1 + bullDrift);
-
-  const monthlyPath = buildMonthlyPath({
-    ticker,
-    currentPrice: stats.latestPrice,
-    targetPrice: baseTarget,
-    months: 12,
-    annualDrift: baseDrift,
-    annualVolatility: stats.annualVol,
-    meanReversionStrength: 0.22,
-  }).map((point) => ({
-    month: point.month,
-    price: Number(point.price.toFixed(2)),
-  }));
-
-  const projectionBands = buildProjectionBands({
-    monthlyPath,
-    latestPrice: stats.latestPrice,
-    volatility: stats.annualVol,
-  });
-
-  const projections = Array.from({ length: 5 }, (_, index) => {
-    const year = index + 1;
-    const bearPrice = stats.latestPrice * Math.pow(1 + bearDrift, year);
-    const basePrice = stats.latestPrice * Math.pow(1 + baseDrift, year);
-    const bullPrice = stats.latestPrice * Math.pow(1 + bullDrift, year);
-
-    return {
-      year,
-      projectedBearEPS: null,
-      projectedBaseEPS: null,
-      projectedBullEPS: null,
-      bearPrice: Number(bearPrice.toFixed(2)),
-      blendedPrice: Number(basePrice.toFixed(2)),
-      bullPrice: Number(bullPrice.toFixed(2)),
-    };
-  });
-
-  return {
-    assetType: "etf",
-    latestPrice: Number(stats.latestPrice.toFixed(2)),
-    ma50: Number(stats.ma50.toFixed(2)),
-    ma200: Number(stats.ma200.toFixed(2)),
-    oneYearReturn: Number((stats.oneYearReturn * 100).toFixed(2)),
-    threeYearCagr: Number((stats.threeYearCagr * 100).toFixed(2)),
-    annualVol: Number((stats.annualVol * 100).toFixed(2)),
-    annualDrift: Number((baseDrift * 100).toFixed(2)),
-    trailingPE: null,
-    forwardPE: null,
-    epsGrowth: null,
-    revenueGrowth: null,
-    avgNewsSentiment: Number(stats.avgNewsSentiment.toFixed(2)),
-    assumptions: {
-      modelType: "trend",
-      forwardEPS: null,
-      normalizedGrowth: null,
-      scenarioGrowths: {
-        bearGrowth: Number((bearDrift * 100).toFixed(2)),
-        baseGrowth: Number((baseDrift * 100).toFixed(2)),
-        bullGrowth: Number((bullDrift * 100).toFixed(2)),
-      },
-      scenarioPEs: null,
-      fairValues: {
-        bear: Number(bearTarget.toFixed(2)),
-        base: Number(baseTarget.toFixed(2)),
-        bull: Number(bullTarget.toFixed(2)),
-      },
-    },
-    projections,
-    monthlyPath,
-    projectionBands,
-  };
-}
-
-export async function GET(_request, context) {
-  try {
-    const params = await context.params;
-    const cleanTicker = String(params?.ticker || "").trim().toUpperCase();
-
-    if (!cleanTicker) {
-      return Response.json({ error: "Ticker is required." }, { status: 400 });
-    }
-
-    const prices = await fetchStooqHistory(cleanTicker);
-
-    let fundamentals = null;
-    let assetType = "stock";
-    let companyName = cleanTicker;
-    let exchange = null;
-
-    try {
-      fundamentals = await fetchSecFundamentals(cleanTicker);
-
-      const hasUsefulFundamentals =
-        (fundamentals?.eps?.length || 0) > 0 || (fundamentals?.revenue?.length || 0) > 0;
-
-      if (!hasUsefulFundamentals) {
-        assetType = "etf";
-      } else {
-        companyName = fundamentals.companyName || cleanTicker;
-        exchange = fundamentals.exchange || null;
-      }
-    } catch (_err) {
-      assetType = "etf";
-      fundamentals = {
-        companyName: cleanTicker,
-        exchange: null,
-        cik: null,
-        revenue: [],
-        netIncome: [],
-        eps: [],
-      };
-    }
-
-    const news = await fetchNews(cleanTicker, companyName);
-
-    const model =
-      assetType === "stock"
-        ? buildProjection({
-            ticker: cleanTicker,
-            prices,
-            fundamentals,
-            news,
-          })
-        : buildEtfProjection({
-            ticker: cleanTicker,
-            prices,
-            news,
-          });
-
-    return Response.json({
-      ticker: cleanTicker,
-      assetType: model.assetType,
-      companyName,
-      exchange,
-      prices: prices.slice(-600),
-      fundamentals,
-      news,
-      model,
-    });
-  } catch (err) {
-    return Response.json(
-      { error: err.message || "Analysis failed." },
-      { status: 500 }
+function FactRows({ rows, formatter = (x) => x }) {
+  if (!rows?.length) {
+    return (
+      <tbody>
+        <tr>
+          <td colSpan="2">No recent data</td>
+        </tr>
+      </tbody>
     );
   }
+
+  const normalized = rows.map((r) => ({
+    ...r,
+    year: r.fy || new Date(r.end).getFullYear(),
+  }));
+
+  normalized.sort((a, b) => b.year - a.year);
+
+  const seen = new Set();
+  const cleaned = [];
+
+  for (const r of normalized) {
+    if (!seen.has(r.year)) {
+      seen.add(r.year);
+      cleaned.push(r);
+    }
+  }
+
+  const finalRows = cleaned.slice(0, 5);
+
+  return (
+    <tbody>
+      {finalRows.map((r, index) => (
+        <tr key={`${r.year}-${index}`}>
+          <td>{r.year}</td>
+          <td>{formatter(r.val)}</td>
+        </tr>
+      ))}
+    </tbody>
+  );
+}
+
+function riskClass(label) {
+  if (label === "Low") return "good";
+  if (label === "Moderate") return "warn";
+  if (label === "High" || label === "Very High") return "bad";
+  return "";
+}
+
+export default function AnalyzerClient() {
+  const searchParams = useSearchParams();
+
+  const [ticker, setTicker] = useState(searchParams.get("ticker") || "");
+  const [status, setStatus] = useState("Ready.");
+  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState(null);
+  const [error, setError] = useState("");
+  const [savingWatchlist, setSavingWatchlist] = useState(false);
+  const [savingAnalysis, setSavingAnalysis] = useState(false);
+
+  const model = data?.model;
+  const fundamentals = data?.fundamentals;
+  const news = data?.news || [];
+  const assetType = data?.assetType || model?.assetType || "stock";
+  const isEtf = assetType === "etf";
+  const sentiment = sentimentLabel(model?.avgNewsSentiment ?? 0);
+
+  const fairValues = model?.assumptions?.fairValues || null;
+  const normalizedGrowth = model?.assumptions?.normalizedGrowth ?? null;
+  const scenarioPEs = model?.assumptions?.scenarioPEs || null;
+  const scenarioGrowths = model?.assumptions?.scenarioGrowths || null;
+  const confidence = model?.confidence || null;
+  const riskLabel = model?.riskLabel || "—";
+  const investmentTake = model?.investmentTake || "";
+
+  const baseUpside = useMemo(() => {
+    if (!fairValues?.base || !model?.latestPrice) return null;
+    return calcReturnPercent(fairValues.base, model.latestPrice);
+  }, [fairValues, model?.latestPrice]);
+
+  async function runAnalysis(inputTicker) {
+    const cleanTicker = inputTicker.trim().toUpperCase();
+
+    if (!cleanTicker) {
+      setStatus("Please enter a ticker.");
+      return;
+    }
+
+    if (!/^[A-Z]{1,6}$/.test(cleanTicker)) {
+      setStatus("Please enter a valid ticker symbol (1–6 letters only).");
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError("");
+      setData(null);
+      setStatus(`Analyzing ${cleanTicker}...`);
+
+      const res = await fetch(`/api/analyze/${encodeURIComponent(cleanTicker)}`);
+      const payload = await res.json();
+
+      if (!res.ok) {
+        throw new Error(payload.error || "Analysis failed.");
+      }
+
+      setData(payload);
+      setStatus(
+        `Finished analyzing ${cleanTicker}${payload.assetType === "etf" ? " (ETF)" : ""}.`
+      );
+    } catch (err) {
+      setError(err.message || "Something went wrong.");
+      setStatus(err.message || "Something went wrong.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    const urlTicker = searchParams.get("ticker");
+    if (urlTicker) {
+      const clean = urlTicker.toUpperCase();
+      setTicker(clean);
+      runAnalysis(clean);
+    }
+  }, [searchParams]);
+
+  async function handleAddToWatchlist() {
+    if (!data?.ticker) {
+      alert("Analyze a ticker first.");
+      return;
+    }
+
+    try {
+      setSavingWatchlist(true);
+
+      const supabase = createClient();
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (userError) throw new Error(userError.message);
+
+      if (!user) {
+        alert("You must be logged in to add to your watchlist.");
+        return;
+      }
+
+      const { error: insertError } = await supabase.from("watchlists").insert([
+        {
+          user_id: user.id,
+          ticker: data.ticker,
+        },
+      ]);
+
+      if (insertError) {
+        if (insertError.code === "23505") {
+          alert(`${data.ticker} is already in your watchlist.`);
+          return;
+        }
+        throw new Error(insertError.message);
+      }
+
+      alert(`${data.ticker} added to watchlist!`);
+    } catch (err) {
+      alert(err.message || "Error adding to watchlist.");
+    } finally {
+      setSavingWatchlist(false);
+    }
+  }
+
+  async function handleSaveAnalysis() {
+    if (!data || !model) {
+      alert("Analyze a ticker first.");
+      return;
+    }
+
+    try {
+      setSavingAnalysis(true);
+
+      const supabase = createClient();
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (userError) throw new Error(userError.message);
+
+      if (!user) {
+        alert("You must be logged in to save an analysis.");
+        return;
+      }
+
+      const { error: insertError } = await supabase.from("analyses").insert([
+        {
+          user_id: user.id,
+          ticker: data.ticker,
+          price: model.latestPrice ?? null,
+          drift: model.annualDrift ?? null,
+          volatility: model.annualVol ?? null,
+          forward_pe: model.forwardPE ?? null,
+        },
+      ]);
+
+      if (insertError) throw new Error(insertError.message);
+
+      alert(`${data.ticker} analysis saved.`);
+    } catch (err) {
+      alert(err.message || "Failed to save analysis.");
+    } finally {
+      setSavingAnalysis(false);
+    }
+  }
+
+  return (
+    <>
+      <section className="hero">
+        <h1>Market Analyzer</h1>
+
+        <div className="searchbar">
+          <input
+            value={ticker}
+            onChange={(e) => setTicker(e.target.value.toUpperCase())}
+            onKeyDown={(e) => e.key === "Enter" && runAnalysis(ticker)}
+            placeholder="Enter ticker (AAPL, NVDA, SPY, QQQ)"
+          />
+          <button onClick={() => runAnalysis(ticker)} disabled={loading}>
+            {loading ? "Analyzing..." : "Analyze Ticker"}
+          </button>
+        </div>
+
+        <div className="status">{status}</div>
+      </section>
+
+      {error && !data ? <div className="placeholder-card">{error}</div> : null}
+
+      {data && model ? (
+        <section>
+          <div className="grid">
+            <div className="card span-12">
+              <div className="card-header">
+                <div>
+                  <h2 className="card-title">
+                    {data.companyName} ({data.ticker})
+                  </h2>
+                  <div className="card-sub">
+                    {(data.exchange || "Exchange unavailable")} ·{" "}
+                    {isEtf ? "ETF trend model" : "SEC + Stooq + Google News"}
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    display: "flex",
+                    gap: "8px",
+                    flexWrap: "wrap",
+                    justifyContent: "flex-end",
+                  }}
+                >
+                  <div className="pill">
+                    {isEtf ? "Asset Type: ETF" : "Asset Type: Stock"}
+                  </div>
+                  <div className={`pill ${sentiment.cls}`}>
+                    News sentiment: {sentiment.text}
+                  </div>
+                </div>
+              </div>
+
+              <div className="card-body">
+                <div className="stats">
+                  <div className="stat">
+                    <div className="stat-label">Latest Price</div>
+                    <div className="stat-value">{fmtMoney(model.latestPrice)}</div>
+                  </div>
+
+                  <div className="stat">
+                    <div className="stat-label">
+                      {isEtf ? "Base 12M Target" : "Base Fair Value"}
+                      <InfoTooltip
+                        text={
+                          isEtf
+                            ? "Base-case 12-month target from the ETF trend and volatility model."
+                            : "Base-case valuation from projected EPS multiplied by the base scenario P/E multiple."
+                        }
+                      />
+                    </div>
+                    <div className="stat-value">
+                      {fairValues?.base != null ? fmtMoney(fairValues.base) : "—"}
+                    </div>
+                  </div>
+
+                  <div className="stat">
+                    <div className="stat-label">
+                      Base Upside / Downside
+                      <InfoTooltip text="Difference between current price and the base-case target." />
+                    </div>
+                    <div className="stat-value">
+                      {baseUpside != null ? fmtPercent(baseUpside) : "—"}
+                    </div>
+                  </div>
+
+                  <div className="stat">
+                    <div className="stat-label">
+                      Confidence Score
+                      <InfoTooltip text="A simple 1 to 10 conviction score based on trend, return profile, volatility, and signal agreement." />
+                    </div>
+                    <div className="stat-value">
+                      {confidence ? `${confidence.score}/10` : "—"}
+                    </div>
+                  </div>
+                </div>
+
+                {investmentTake ? (
+                  <div
+                    className="news-item"
+                    style={{
+                      marginTop: "16px",
+                      background: "rgba(255,255,255,0.035)",
+                    }}
+                  >
+                    <strong style={{ display: "block", marginBottom: "6px" }}>
+                      Investment Take
+                    </strong>
+                    {investmentTake}
+                  </div>
+                ) : null}
+
+                <div
+                  style={{
+                    marginTop: "14px",
+                    display: "flex",
+                    gap: "10px",
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <button
+                    onClick={handleAddToWatchlist}
+                    disabled={savingWatchlist}
+                    style={{
+                      padding: "8px 12px",
+                      background: "#22c55e",
+                      color: "white",
+                      border: "none",
+                      borderRadius: "6px",
+                      cursor: savingWatchlist ? "not-allowed" : "pointer",
+                      opacity: savingWatchlist ? 0.7 : 1,
+                    }}
+                  >
+                    {savingWatchlist ? "Adding..." : "Add to Watchlist"}
+                  </button>
+
+                  <button
+                    onClick={handleSaveAnalysis}
+                    disabled={savingAnalysis}
+                    style={{
+                      padding: "8px 12px",
+                      background: "#2563eb",
+                      color: "white",
+                      border: "none",
+                      borderRadius: "6px",
+                      cursor: savingAnalysis ? "not-allowed" : "pointer",
+                      opacity: savingAnalysis ? 0.7 : 1,
+                    }}
+                  >
+                    {savingAnalysis ? "Saving..." : "Save Analysis"}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="card span-8">
+              <div className="card-header">
+                <div>
+                  <h3 className="card-title">Historical Price vs Projection</h3>
+                  <div className="card-sub">
+                    {isEtf
+                      ? "Historical prices with a trend and volatility-based projection path"
+                      : "Historical prices with mean-reverting monthly base-case path"}
+                  </div>
+                </div>
+              </div>
+              <div className="card-body">
+                <PriceChart
+                  historical={data.prices}
+                  projections={model.monthlyPath || []}
+                  projectionBands={model.projectionBands || []}
+                />
+              </div>
+            </div>
+
+            <div className="card span-4">
+              <div className="card-header">
+                <div>
+                  <h3 className="card-title">Signal Snapshot</h3>
+                  <div className="card-sub">
+                    {isEtf
+                      ? "Trend, returns, volatility, momentum, sentiment"
+                      : "Trend, returns, growth, valuation, sentiment"}
+                  </div>
+                </div>
+              </div>
+              <div className="card-body">
+                <div className="stats" style={{ gridTemplateColumns: "1fr" }}>
+                  <div className="stat">
+                    <div className="stat-label">1Y Return</div>
+                    <div className="stat-value">{fmtPercent(model.oneYearReturn)}</div>
+                  </div>
+
+                  <div className="stat">
+                    <div className="stat-label">3Y CAGR</div>
+                    <div className="stat-value">{fmtPercent(model.threeYearCagr)}</div>
+                  </div>
+
+                  <div className="stat">
+                    <div className="stat-label">
+                      Annual Drift
+                      <InfoTooltip text="Historical price-based expected return estimate used in the projection path." />
+                    </div>
+                    <div className="stat-value">{fmtPercent(model.annualDrift)}</div>
+                  </div>
+
+                  <div className="stat">
+                    <div className="stat-label">
+                      Annual Volatility
+                      <InfoTooltip text="Historical annualized volatility estimate. Higher means larger price swings." />
+                    </div>
+                    <div className="stat-value">{fmtPercent(model.annualVol)}</div>
+                  </div>
+
+                  <div className="stat">
+                    <div className="stat-label">
+                      Risk Level
+                      <InfoTooltip text="A quick risk label derived mainly from annualized volatility." />
+                    </div>
+                    <div className={`stat-value ${riskClass(riskLabel)}`}>{riskLabel}</div>
+                  </div>
+
+                  <div className="stat">
+                    <div className="stat-label">
+                      Confidence Band
+                      <InfoTooltip text="A simplified confidence label based on the overall confidence score." />
+                    </div>
+                    <div className="stat-value">
+                      {confidence?.label || "—"}
+                    </div>
+                  </div>
+
+                  {!isEtf ? (
+                    <>
+                      <div className="stat">
+                        <div className="stat-label">
+                          EPS Growth
+                          <InfoTooltip text="Recent EPS trend used as one input into the blended growth estimate." />
+                        </div>
+                        <div className="stat-value">{fmtPercent(model.epsGrowth)}</div>
+                      </div>
+
+                      <div className="stat">
+                        <div className="stat-label">
+                          Revenue Growth
+                          <InfoTooltip text="Recent revenue trend used as one input into the blended growth estimate." />
+                        </div>
+                        <div className="stat-value">{fmtPercent(model.revenueGrowth)}</div>
+                      </div>
+
+                      <div className="stat">
+                        <div className="stat-label">
+                          Normalized Growth
+                          <InfoTooltip text="Capped blended growth estimate combining recent EPS trend, revenue trend, and a small sentiment adjustment." />
+                        </div>
+                        <div className="stat-value">
+                          {normalizedGrowth != null ? fmtPercent(normalizedGrowth) : "—"}
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="stat">
+                        <div className="stat-label">50D Moving Average</div>
+                        <div className="stat-value">{fmtMoney(model.ma50)}</div>
+                      </div>
+
+                      <div className="stat">
+                        <div className="stat-label">200D Moving Average</div>
+                        <div className="stat-value">{fmtMoney(model.ma200)}</div>
+                      </div>
+
+                      <div className="stat">
+                        <div className="stat-label">
+                          Model Type
+                          <InfoTooltip text="ETF analysis uses price trend, momentum, and volatility rather than corporate fundamentals." />
+                        </div>
+                        <div className="stat-value">Trend</div>
+                      </div>
+                    </>
+                  )}
+
+                  <div className="stat">
+                    <div className="stat-label">
+                      News Sentiment
+                      <InfoTooltip text="Average sentiment score from recent news headlines." />
+                    </div>
+                    <div className="stat-value">
+                      {model.avgNewsSentiment != null
+                        ? `${model.avgNewsSentiment.toFixed(2)} (${sentiment.text})`
+                        : "—"}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="card span-12">
+              <div className="card-header">
+                <div>
+                  <h3 className="card-title">
+                    {isEtf ? "Scenario Projections" : "Valuation Scenarios"}
+                  </h3>
+                  <div className="card-sub">
+                    {isEtf
+                      ? "Bull, base, and bear price paths based on trend and volatility assumptions"
+                      : "One-year EPS, fair value, and upside/downside by scenario"}
+                  </div>
+                </div>
+              </div>
+              <div className="card-body">
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Year</th>
+                        {!isEtf && <th>Bear EPS</th>}
+                        {!isEtf && <th>Base EPS</th>}
+                        {!isEtf && <th>Bull EPS</th>}
+                        <th>Base Upside / Downside</th>
+                        <th>Bear Price</th>
+                        <th>Base Price</th>
+                        <th>Bull Price</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(model.projections || []).map((p) => {
+                        const upsidePct = calcReturnPercent(
+                          p.blendedPrice,
+                          model.latestPrice
+                        );
+
+                        const upsideClass =
+                          upsidePct != null ? (upsidePct >= 0 ? "good" : "bad") : "";
+
+                        return (
+                          <tr key={p.year}>
+                            <td>{p.year}</td>
+
+                            {!isEtf && (
+                              <td>
+                                {p.projectedBearEPS != null
+                                  ? `$${p.projectedBearEPS.toFixed(2)}`
+                                  : "—"}
+                              </td>
+                            )}
+
+                            {!isEtf && (
+                              <td>
+                                {p.projectedBaseEPS != null
+                                  ? `$${p.projectedBaseEPS.toFixed(2)}`
+                                  : "—"}
+                              </td>
+                            )}
+
+                            {!isEtf && (
+                              <td>
+                                {p.projectedBullEPS != null
+                                  ? `$${p.projectedBullEPS.toFixed(2)}`
+                                  : "—"}
+                              </td>
+                            )}
+
+                            <td className={upsideClass}>
+                              <strong>{fmtPercent(upsidePct)}</strong>
+                            </td>
+                            <td className="bad">{fmtMoney(p.bearPrice)}</td>
+                            <td>
+                              <strong>{fmtMoney(p.blendedPrice)}</strong>
+                            </td>
+                            <td className="good">{fmtMoney(p.bullPrice)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div
+                  style={{
+                    marginTop: "16px",
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+                    gap: "12px",
+                  }}
+                >
+                  <div className="stat">
+                    <div className="stat-label">
+                      {isEtf ? "Projection Engine" : "Forward EPS Used"}
+                      <InfoTooltip
+                        text={
+                          isEtf
+                            ? "ETF targets are derived from price trend, momentum, and volatility assumptions."
+                            : "EPS anchor used by the valuation engine before projecting future earnings."
+                        }
+                      />
+                    </div>
+                    <div className="stat-value" style={{ fontSize: isEtf ? "1rem" : undefined }}>
+                      {isEtf
+                        ? "Trend + Volatility"
+                        : model.assumptions?.forwardEPS != null
+                        ? `$${Number(model.assumptions.forwardEPS).toFixed(2)}`
+                        : "—"}
+                    </div>
+                  </div>
+
+                  <div className="stat">
+                    <div className="stat-label">
+                      {isEtf ? "Scenario Growths" : "Scenario P/Es"}
+                      <InfoTooltip
+                        text={
+                          isEtf
+                            ? "Bear, base, and bull annual drift assumptions for the ETF model."
+                            : "Bear, base, and bull valuation multiples used to convert projected EPS into fair values."
+                        }
+                      />
+                    </div>
+                    <div className="stat-value" style={{ fontSize: "0.95rem" }}>
+                      {isEtf
+                        ? scenarioGrowths
+                          ? `${fmtPercent(scenarioGrowths.bearGrowth)} / ${fmtPercent(
+                              scenarioGrowths.baseGrowth
+                            )} / ${fmtPercent(scenarioGrowths.bullGrowth)}`
+                          : "—"
+                        : scenarioPEs
+                        ? `${scenarioPEs.bearPE.toFixed(2)} / ${scenarioPEs.basePE.toFixed(
+                            2
+                          )} / ${scenarioPEs.bullPE.toFixed(2)}`
+                        : "—"}
+                    </div>
+                  </div>
+
+                  <div className="stat">
+                    <div className="stat-label">
+                      {isEtf ? "Target Range" : "Scenario Growths"}
+                      <InfoTooltip
+                        text={
+                          isEtf
+                            ? "Bear, base, and bull 12-month targets from the ETF projection model."
+                            : "Bear, base, and bull growth assumptions derived from the normalized growth estimate."
+                        }
+                      />
+                    </div>
+                    <div className="stat-value" style={{ fontSize: "0.95rem" }}>
+                      {isEtf
+                        ? fairValues
+                          ? `${fmtMoney(fairValues.bear)} / ${fmtMoney(fairValues.base)} / ${fmtMoney(
+                              fairValues.bull
+                            )}`
+                          : "—"
+                        : scenarioGrowths
+                        ? `${fmtPercent(scenarioGrowths.bearGrowth)} / ${fmtPercent(
+                            scenarioGrowths.baseGrowth
+                          )} / ${fmtPercent(scenarioGrowths.bullGrowth)}`
+                        : "—"}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {!isEtf ? (
+              <div className="card span-6">
+                <div className="card-header">
+                  <div>
+                    <h3 className="card-title">Fundamentals from SEC</h3>
+                    <div className="card-sub">
+                      Recent annual revenue, net income, and EPS
+                    </div>
+                  </div>
+                </div>
+                <div className="card-body">
+                  <div className="mini-grid">
+                    <div>
+                      <h4 style={{ marginTop: 0 }}>Revenue</h4>
+                      <div className="table-wrap">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>FY</th>
+                              <th>Value</th>
+                            </tr>
+                          </thead>
+                          <FactRows rows={fundamentals?.revenue} formatter={fmtBigNumber} />
+                        </table>
+                      </div>
+                    </div>
+
+                    <div>
+                      <h4 style={{ marginTop: 0 }}>EPS</h4>
+                      <div className="table-wrap">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>FY</th>
+                              <th>Value</th>
+                            </tr>
+                          </thead>
+                          <FactRows
+                            rows={fundamentals?.eps}
+                            formatter={(v) => `$${Number(v).toFixed(2)}`}
+                          />
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ marginTop: 14 }}>
+                    <h4>Net Income</h4>
+                    <div className="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>FY</th>
+                            <th>Value</th>
+                          </tr>
+                        </thead>
+                        <FactRows
+                          rows={fundamentals?.netIncome}
+                          formatter={fmtBigNumber}
+                        />
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="card span-6">
+                <div className="card-header">
+                  <div>
+                    <h3 className="card-title">ETF Model Notes</h3>
+                    <div className="card-sub">
+                      How this projection is generated
+                    </div>
+                  </div>
+                </div>
+                <div className="card-body">
+                  <div className="news-list">
+                    <div className="news-item">
+                      ETF projections use price trend, momentum, moving averages, and
+                      historical volatility instead of company earnings and valuation
+                      multiples.
+                    </div>
+                    <div className="news-item">
+                      This makes the ETF analysis more appropriate for index funds and
+                      diversified baskets where EPS-based fair value is less useful.
+                    </div>
+                    <div className="news-item">
+                      The bull, base, and bear cases represent different return regimes
+                      rather than changes in company fundamentals.
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="card span-6">
+              <div className="card-header">
+                <div>
+                  <h3 className="card-title">Recent News</h3>
+                  <div className="card-sub">
+                    Headlines used for simple sentiment scoring
+                  </div>
+                </div>
+              </div>
+              <div className="card-body">
+                <div className="news-list">
+                  {news.length ? (
+                    news.slice(0, 5).map((n, i) => (
+                      <div className="news-item" key={i}>
+                        {n.title}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="news-item">No recent headlines found.</div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      ) : null}
+    </>
+  );
 }

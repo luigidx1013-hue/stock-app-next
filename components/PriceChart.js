@@ -46,21 +46,21 @@ export default function PriceChart({
   projectionBands = [],
 }) {
   const historicalDaily = historical
-  .filter((p) => p?.date && Number.isFinite(Number(p?.close)))
-  .map((p) => ({
-    date: parseDate(p.date),
-    close: Number(p.close),
-  }))
-  .filter((p) => p.date);
+    .filter((p) => p?.date && Number.isFinite(Number(p?.close)))
+    .map((p) => ({
+      date: parseDate(p.date),
+      close: Number(p.close),
+    }))
+    .filter((p) => p.date);
 
-const monthlyMap = new Map();
+  const monthlyMap = new Map();
 
-for (const point of historicalDaily) {
-  const key = `${point.date.getFullYear()}-${point.date.getMonth()}`;
-  monthlyMap.set(key, point); // keeps the latest point in each month
-}
+  for (const point of historicalDaily) {
+    const key = `${point.date.getFullYear()}-${point.date.getMonth()}`;
+    monthlyMap.set(key, point);
+  }
 
-const historicalPoints = Array.from(monthlyMap.values()).slice(-12);
+  const historicalPoints = Array.from(monthlyMap.values()).slice(-12);
 
   if (!historicalPoints.length) {
     return <p>No chart data available.</p>;
@@ -116,40 +116,44 @@ const historicalPoints = Array.from(monthlyMap.values()).slice(-12);
     labels,
     datasets: [
       {
-        label: "Historical Close",
+        label: "Historical Price",
         data: historicalData,
         borderColor: "#8ab4ff",
         backgroundColor: "#8ab4ff",
-        tension: 0.25,
+        tension: 0.28,
         pointRadius: 0,
+        pointHoverRadius: 3,
         borderWidth: 3,
       },
       {
-        label: "Projection Low",
+        label: "Projection Floor",
         data: lowBandData,
         borderColor: "rgba(125, 211, 252, 0)",
         backgroundColor: "rgba(125, 211, 252, 0)",
         pointRadius: 0,
+        pointHoverRadius: 0,
         borderWidth: 0,
       },
       {
         label: "Projection Range",
         data: highBandData,
-        borderColor: "rgba(34, 197, 94, 0.12)",
-        backgroundColor: "rgba(34, 197, 94, 0.2)",
+        borderColor: "rgba(34, 197, 94, 0.18)",
+        backgroundColor: "rgba(34, 197, 94, 0.18)",
         pointRadius: 0,
+        pointHoverRadius: 0,
         borderWidth: 1,
         fill: "-1",
-        tension: 0.2,
+        tension: 0.22,
       },
       {
         label: "Base Projection",
         data: projectionData,
         borderColor: "#9ae6b4",
         backgroundColor: "#9ae6b4",
-        tension: 0.2,
-        pointRadius: 4,
-        borderWidth: 4,
+        tension: 0.22,
+        pointRadius: 3,
+        pointHoverRadius: 5,
+        borderWidth: 3,
         borderDash: [6, 6],
       },
     ],
@@ -166,7 +170,9 @@ const historicalPoints = Array.from(monthlyMap.values()).slice(-12);
       legend: {
         labels: {
           color: "#e5e7eb",
-          filter: (legendItem) => !["Projection Low"].includes(legendItem.text),
+          boxWidth: 12,
+          boxHeight: 12,
+          filter: (legendItem) => !["Projection Floor"].includes(legendItem.text),
         },
       },
       tooltip: {
@@ -183,6 +189,9 @@ const historicalPoints = Array.from(monthlyMap.values()).slice(-12);
       x: {
         ticks: {
           color: "#cbd5e1",
+          maxRotation: 0,
+          autoSkip: true,
+          maxTicksLimit: 8,
         },
         grid: {
           color: "rgba(148, 163, 184, 0.12)",
@@ -203,7 +212,7 @@ const historicalPoints = Array.from(monthlyMap.values()).slice(-12);
   };
 
   return (
-    <div style={{ height: 420 }}>
+    <div style={{ height: "clamp(260px, 50vw, 420px)", width: "100%" }}>
       <Line data={data} options={options} />
     </div>
   );

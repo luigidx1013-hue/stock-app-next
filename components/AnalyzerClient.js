@@ -93,12 +93,15 @@ export default function AnalyzerClient() {
   const model = data?.model;
   const fundamentals = data?.fundamentals;
   const news = data?.news || [];
+  const assetType = data?.assetType || model?.assetType || "stock";
+  const isEtf = assetType === "etf";
   const sentiment = sentimentLabel(model?.avgNewsSentiment ?? 0);
 
   const fairValues = model?.assumptions?.fairValues || null;
   const normalizedGrowth = model?.assumptions?.normalizedGrowth ?? null;
   const scenarioPEs = model?.assumptions?.scenarioPEs || null;
   const scenarioGrowths = model?.assumptions?.scenarioGrowths || null;
+  const modelType = model?.assumptions?.modelType || (isEtf ? "trend" : "fundamental");
 
   const baseUpside = useMemo(() => {
     if (!fairValues?.base || !model?.latestPrice) return null;
@@ -113,8 +116,8 @@ export default function AnalyzerClient() {
       return;
     }
 
-    if (!/^[A-Z]{1,5}$/.test(cleanTicker)) {
-      setStatus("Please enter a valid ticker symbol (1–5 letters only).");
+    if (!/^[A-Z]{1,6}$/.test(cleanTicker)) {
+      setStatus("Please enter a valid ticker symbol (1–6 letters only).");
       return;
     }
 
@@ -132,7 +135,9 @@ export default function AnalyzerClient() {
       }
 
       setData(payload);
-      setStatus(`Finished analyzing ${cleanTicker}.`);
+      setStatus(
+        `Finished analyzing ${cleanTicker}${payload.assetType === "etf" ? " (ETF)" : ""}.`
+      );
     } catch (err) {
       setError(err.message || "Something went wrong.");
       setStatus(err.message || "Something went wrong.");
@@ -152,7 +157,7 @@ export default function AnalyzerClient() {
 
   async function handleAddToWatchlist() {
     if (!data?.ticker) {
-      alert("Analyze a stock first.");
+      alert("Analyze a ticker first.");
       return;
     }
 
@@ -197,7 +202,7 @@ export default function AnalyzerClient() {
 
   async function handleSaveAnalysis() {
     if (!data || !model) {
-      alert("Analyze a stock first.");
+      alert("Analyze a ticker first.");
       return;
     }
 
@@ -241,17 +246,17 @@ export default function AnalyzerClient() {
   return (
     <>
       <section className="hero">
-        <h1>Stock Projection Analyzer</h1>
+        <h1>Market Analyzer</h1>
 
         <div className="searchbar">
           <input
             value={ticker}
             onChange={(e) => setTicker(e.target.value.toUpperCase())}
             onKeyDown={(e) => e.key === "Enter" && runAnalysis(ticker)}
-            placeholder="Enter ticker (AAPL, JPM, NVDA)"
+            placeholder="Enter ticker (AAPL, NVDA, SPY, QQQ)"
           />
           <button onClick={() => runAnalysis(ticker)} disabled={loading}>
-            {loading ? "Analyzing..." : "Analyze Stock"}
+            {loading ? "Analyzing..." : "Analyze Ticker"}
           </button>
         </div>
 
@@ -270,11 +275,25 @@ export default function AnalyzerClient() {
                     {data.companyName} ({data.ticker})
                   </h2>
                   <div className="card-sub">
-                    {data.exchange || "Exchange unavailable"} · SEC + Stooq + Google News
+                    {(data.exchange || "Exchange unavailable")} ·{" "}
+                    {isEtf ? "ETF trend model" : "SEC + Stooq + Google News"}
                   </div>
                 </div>
-                <div className={`pill ${sentiment.cls}`}>
-                  News sentiment: {sentiment.text}
+
+                <div
+                  style={{
+                    display: "flex",
+                    gap: "8px",
+                    flexWrap: "wrap",
+                    justifyContent: "flex-end",
+                  }}
+                >
+                  <div className="pill">
+                    {isEtf ? "Asset Type: ETF" : "Asset Type: Stock"}
+                  </div>
+                  <div className={`pill ${sentiment.cls}`}>
+                    News sentiment: {sentiment.text}
+                  </div>
                 </div>
               </div>
 
@@ -287,8 +306,14 @@ export default function AnalyzerClient() {
 
                   <div className="stat">
                     <div className="stat-label">
-                      Base Fair Value
-                      <InfoTooltip text="Base-case valuation from projected EPS multiplied by the base scenario P/E multiple." />
+                      {isEtf ? "Base 12M Target" : "Base Fair Value"}
+                      <InfoTooltip
+                        text={
+                          isEtf
+                            ? "Base-case 12-month target from the ETF trend and volatility model."
+                            : "Base-case valuation from projected EPS multiplied by the base scenario P/E multiple."
+                        }
+                      />
                     </div>
                     <div className="stat-value">
                       {fairValues?.base != null ? fmtMoney(fairValues.base) : "—"}
@@ -298,7 +323,7 @@ export default function AnalyzerClient() {
                   <div className="stat">
                     <div className="stat-label">
                       Base Upside / Downside
-                      <InfoTooltip text="Difference between current price and base-case fair value." />
+                      <InfoTooltip text="Difference between current price and the base-case target." />
                     </div>
                     <div className="stat-value">
                       {baseUpside != null ? fmtPercent(baseUpside) : "—"}
@@ -307,11 +332,21 @@ export default function AnalyzerClient() {
 
                   <div className="stat">
                     <div className="stat-label">
-                      Forward P/E Used
-                      <InfoTooltip text="Valuation multiple applied to projected earnings to estimate fair value." />
+                      {isEtf ? "Model Type" : "Forward P/E Used"}
+                      <InfoTooltip
+                        text={
+                          isEtf
+                            ? "ETFs use a price trend and volatility model rather than an EPS/P-E valuation model."
+                            : "Valuation multiple applied to projected earnings to estimate fair value."
+                        }
+                      />
                     </div>
                     <div className="stat-value">
-                      {model.forwardPE != null ? model.forwardPE.toFixed(2) : "—"}
+                      {isEtf
+                        ? "Trend"
+                        : model.forwardPE != null
+                        ? model.forwardPE.toFixed(2)
+                        : "—"}
                     </div>
                   </div>
                 </div>
@@ -364,7 +399,9 @@ export default function AnalyzerClient() {
                 <div>
                   <h3 className="card-title">Historical Price vs Projection</h3>
                   <div className="card-sub">
-                    Historical prices with mean-reverting monthly base-case path
+                    {isEtf
+                      ? "Historical prices with a trend and volatility-based projection path"
+                      : "Historical prices with mean-reverting monthly base-case path"}
                   </div>
                 </div>
               </div>
@@ -372,7 +409,7 @@ export default function AnalyzerClient() {
                 <PriceChart
                   historical={data.prices}
                   projections={model.monthlyPath || []}
-                   projectionBands={model.projectionBands || []}
+                  projectionBands={model.projectionBands || []}
                 />
               </div>
             </div>
@@ -382,7 +419,9 @@ export default function AnalyzerClient() {
                 <div>
                   <h3 className="card-title">Signal Snapshot</h3>
                   <div className="card-sub">
-                    Trend, returns, growth, valuation, sentiment
+                    {isEtf
+                      ? "Trend, returns, volatility, momentum, sentiment"
+                      : "Trend, returns, growth, valuation, sentiment"}
                   </div>
                 </div>
               </div>
@@ -401,7 +440,7 @@ export default function AnalyzerClient() {
                   <div className="stat">
                     <div className="stat-label">
                       Annual Drift
-                      <InfoTooltip text="Historical price-based expected return estimate used in the monthly projection path." />
+                      <InfoTooltip text="Historical price-based expected return estimate used in the projection path." />
                     </div>
                     <div className="stat-value">{fmtPercent(model.annualDrift)}</div>
                   </div>
@@ -414,31 +453,55 @@ export default function AnalyzerClient() {
                     <div className="stat-value">{fmtPercent(model.annualVol)}</div>
                   </div>
 
-                  <div className="stat">
-                    <div className="stat-label">
-                      EPS Growth
-                      <InfoTooltip text="Recent EPS trend used as one input into the blended growth estimate." />
-                    </div>
-                    <div className="stat-value">{fmtPercent(model.epsGrowth)}</div>
-                  </div>
+                  {!isEtf ? (
+                    <>
+                      <div className="stat">
+                        <div className="stat-label">
+                          EPS Growth
+                          <InfoTooltip text="Recent EPS trend used as one input into the blended growth estimate." />
+                        </div>
+                        <div className="stat-value">{fmtPercent(model.epsGrowth)}</div>
+                      </div>
 
-                  <div className="stat">
-                    <div className="stat-label">
-                      Revenue Growth
-                      <InfoTooltip text="Recent revenue trend used as one input into the blended growth estimate." />
-                    </div>
-                    <div className="stat-value">{fmtPercent(model.revenueGrowth)}</div>
-                  </div>
+                      <div className="stat">
+                        <div className="stat-label">
+                          Revenue Growth
+                          <InfoTooltip text="Recent revenue trend used as one input into the blended growth estimate." />
+                        </div>
+                        <div className="stat-value">{fmtPercent(model.revenueGrowth)}</div>
+                      </div>
 
-                  <div className="stat">
-                    <div className="stat-label">
-                      Normalized Growth
-                      <InfoTooltip text="Capped blended growth estimate combining recent EPS trend, revenue trend, and a small sentiment adjustment." />
-                    </div>
-                    <div className="stat-value">
-                      {normalizedGrowth != null ? fmtPercent(normalizedGrowth) : "—"}
-                    </div>
-                  </div>
+                      <div className="stat">
+                        <div className="stat-label">
+                          Normalized Growth
+                          <InfoTooltip text="Capped blended growth estimate combining recent EPS trend, revenue trend, and a small sentiment adjustment." />
+                        </div>
+                        <div className="stat-value">
+                          {normalizedGrowth != null ? fmtPercent(normalizedGrowth) : "—"}
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="stat">
+                        <div className="stat-label">50D Moving Average</div>
+                        <div className="stat-value">{fmtMoney(model.ma50)}</div>
+                      </div>
+
+                      <div className="stat">
+                        <div className="stat-label">200D Moving Average</div>
+                        <div className="stat-value">{fmtMoney(model.ma200)}</div>
+                      </div>
+
+                      <div className="stat">
+                        <div className="stat-label">
+                          Model Type
+                          <InfoTooltip text="ETF analysis uses price trend, momentum, and volatility rather than corporate fundamentals." />
+                        </div>
+                        <div className="stat-value">Trend</div>
+                      </div>
+                    </>
+                  )}
 
                   <div className="stat">
                     <div className="stat-label">
@@ -458,9 +521,13 @@ export default function AnalyzerClient() {
             <div className="card span-12">
               <div className="card-header">
                 <div>
-                  <h3 className="card-title">Valuation Scenarios</h3>
+                  <h3 className="card-title">
+                    {isEtf ? "Scenario Projections" : "Valuation Scenarios"}
+                  </h3>
                   <div className="card-sub">
-                    One-year EPS, fair value, and upside/downside by scenario
+                    {isEtf
+                      ? "Bull, base, and bear price paths based on trend and volatility assumptions"
+                      : "One-year EPS, fair value, and upside/downside by scenario"}
                   </div>
                 </div>
               </div>
@@ -470,9 +537,9 @@ export default function AnalyzerClient() {
                     <thead>
                       <tr>
                         <th>Year</th>
-                        <th>Bear EPS</th>
-                        <th>Base EPS</th>
-                        <th>Bull EPS</th>
+                        {!isEtf && <th>Bear EPS</th>}
+                        {!isEtf && <th>Base EPS</th>}
+                        {!isEtf && <th>Bull EPS</th>}
                         <th>Base Upside / Downside</th>
                         <th>Bear Price</th>
                         <th>Base Price</th>
@@ -492,21 +559,31 @@ export default function AnalyzerClient() {
                         return (
                           <tr key={p.year}>
                             <td>{p.year}</td>
-                            <td>
-                              {p.projectedBearEPS != null
-                                ? `$${p.projectedBearEPS.toFixed(2)}`
-                                : "—"}
-                            </td>
-                            <td>
-                              {p.projectedBaseEPS != null
-                                ? `$${p.projectedBaseEPS.toFixed(2)}`
-                                : "—"}
-                            </td>
-                            <td>
-                              {p.projectedBullEPS != null
-                                ? `$${p.projectedBullEPS.toFixed(2)}`
-                                : "—"}
-                            </td>
+
+                            {!isEtf && (
+                              <td>
+                                {p.projectedBearEPS != null
+                                  ? `$${p.projectedBearEPS.toFixed(2)}`
+                                  : "—"}
+                              </td>
+                            )}
+
+                            {!isEtf && (
+                              <td>
+                                {p.projectedBaseEPS != null
+                                  ? `$${p.projectedBaseEPS.toFixed(2)}`
+                                  : "—"}
+                              </td>
+                            )}
+
+                            {!isEtf && (
+                              <td>
+                                {p.projectedBullEPS != null
+                                  ? `$${p.projectedBullEPS.toFixed(2)}`
+                                  : "—"}
+                              </td>
+                            )}
+
                             <td className={upsideClass}>
                               <strong>{fmtPercent(upsidePct)}</strong>
                             </td>
@@ -532,11 +609,19 @@ export default function AnalyzerClient() {
                 >
                   <div className="stat">
                     <div className="stat-label">
-                      Forward EPS Used
-                      <InfoTooltip text="EPS anchor used by the valuation engine before projecting future earnings." />
+                      {isEtf ? "Projection Engine" : "Forward EPS Used"}
+                      <InfoTooltip
+                        text={
+                          isEtf
+                            ? "ETF targets are derived from price trend, momentum, and volatility assumptions."
+                            : "EPS anchor used by the valuation engine before projecting future earnings."
+                        }
+                      />
                     </div>
-                    <div className="stat-value">
-                      {model.assumptions?.forwardEPS != null
+                    <div className="stat-value" style={{ fontSize: isEtf ? "1rem" : undefined }}>
+                      {isEtf
+                        ? "Trend + Volatility"
+                        : model.assumptions?.forwardEPS != null
                         ? `$${Number(model.assumptions.forwardEPS).toFixed(2)}`
                         : "—"}
                     </div>
@@ -544,11 +629,23 @@ export default function AnalyzerClient() {
 
                   <div className="stat">
                     <div className="stat-label">
-                      Scenario P/Es
-                      <InfoTooltip text="Bear, base, and bull valuation multiples used to convert projected EPS into fair values." />
+                      {isEtf ? "Scenario Growths" : "Scenario P/Es"}
+                      <InfoTooltip
+                        text={
+                          isEtf
+                            ? "Bear, base, and bull annual drift assumptions for the ETF model."
+                            : "Bear, base, and bull valuation multiples used to convert projected EPS into fair values."
+                        }
+                      />
                     </div>
                     <div className="stat-value" style={{ fontSize: "0.95rem" }}>
-                      {scenarioPEs
+                      {isEtf
+                        ? scenarioGrowths
+                          ? `${fmtPercent(scenarioGrowths.bearGrowth)} / ${fmtPercent(
+                              scenarioGrowths.baseGrowth
+                            )} / ${fmtPercent(scenarioGrowths.bullGrowth)}`
+                          : "—"
+                        : scenarioPEs
                         ? `${scenarioPEs.bearPE.toFixed(2)} / ${scenarioPEs.basePE.toFixed(
                             2
                           )} / ${scenarioPEs.bullPE.toFixed(2)}`
@@ -558,11 +655,23 @@ export default function AnalyzerClient() {
 
                   <div className="stat">
                     <div className="stat-label">
-                      Scenario Growths
-                      <InfoTooltip text="Bear, base, and bull growth assumptions derived from the normalized growth estimate." />
+                      {isEtf ? "Target Range" : "Scenario Growths"}
+                      <InfoTooltip
+                        text={
+                          isEtf
+                            ? "Bear, base, and bull 12-month targets from the ETF projection model."
+                            : "Bear, base, and bull growth assumptions derived from the normalized growth estimate."
+                        }
+                      />
                     </div>
                     <div className="stat-value" style={{ fontSize: "0.95rem" }}>
-                      {scenarioGrowths
+                      {isEtf
+                        ? fairValues
+                          ? `${fmtMoney(fairValues.bear)} / ${fmtMoney(fairValues.base)} / ${fmtMoney(
+                              fairValues.bull
+                            )}`
+                          : "—"
+                        : scenarioGrowths
                         ? `${fmtPercent(scenarioGrowths.bearGrowth)} / ${fmtPercent(
                             scenarioGrowths.baseGrowth
                           )} / ${fmtPercent(scenarioGrowths.bullGrowth)}`
@@ -573,34 +682,54 @@ export default function AnalyzerClient() {
               </div>
             </div>
 
-            <div className="card span-6">
-              <div className="card-header">
-                <div>
-                  <h3 className="card-title">Fundamentals from SEC</h3>
-                  <div className="card-sub">
-                    Recent annual revenue, net income, and EPS
+            {!isEtf ? (
+              <div className="card span-6">
+                <div className="card-header">
+                  <div>
+                    <h3 className="card-title">Fundamentals from SEC</h3>
+                    <div className="card-sub">
+                      Recent annual revenue, net income, and EPS
+                    </div>
                   </div>
                 </div>
-              </div>
-              <div className="card-body">
-                <div className="mini-grid">
-                  <div>
-                    <h4 style={{ marginTop: 0 }}>Revenue</h4>
-                    <div className="table-wrap">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>FY</th>
-                            <th>Value</th>
-                          </tr>
-                        </thead>
-                        <FactRows rows={fundamentals?.revenue} formatter={fmtBigNumber} />
-                      </table>
+                <div className="card-body">
+                  <div className="mini-grid">
+                    <div>
+                      <h4 style={{ marginTop: 0 }}>Revenue</h4>
+                      <div className="table-wrap">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>FY</th>
+                              <th>Value</th>
+                            </tr>
+                          </thead>
+                          <FactRows rows={fundamentals?.revenue} formatter={fmtBigNumber} />
+                        </table>
+                      </div>
+                    </div>
+
+                    <div>
+                      <h4 style={{ marginTop: 0 }}>EPS</h4>
+                      <div className="table-wrap">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>FY</th>
+                              <th>Value</th>
+                            </tr>
+                          </thead>
+                          <FactRows
+                            rows={fundamentals?.eps}
+                            formatter={(v) => `$${Number(v).toFixed(2)}`}
+                          />
+                        </table>
+                      </div>
                     </div>
                   </div>
 
-                  <div>
-                    <h4 style={{ marginTop: 0 }}>EPS</h4>
+                  <div style={{ marginTop: 14 }}>
+                    <h4>Net Income</h4>
                     <div className="table-wrap">
                       <table>
                         <thead>
@@ -610,33 +739,43 @@ export default function AnalyzerClient() {
                           </tr>
                         </thead>
                         <FactRows
-                          rows={fundamentals?.eps}
-                          formatter={(v) => `$${Number(v).toFixed(2)}`}
+                          rows={fundamentals?.netIncome}
+                          formatter={fmtBigNumber}
                         />
                       </table>
                     </div>
                   </div>
                 </div>
-
-                <div style={{ marginTop: 14 }}>
-                  <h4>Net Income</h4>
-                  <div className="table-wrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>FY</th>
-                          <th>Value</th>
-                        </tr>
-                      </thead>
-                      <FactRows
-                        rows={fundamentals?.netIncome}
-                        formatter={fmtBigNumber}
-                      />
-                    </table>
+              </div>
+            ) : (
+              <div className="card span-6">
+                <div className="card-header">
+                  <div>
+                    <h3 className="card-title">ETF Model Notes</h3>
+                    <div className="card-sub">
+                      How this projection is generated
+                    </div>
+                  </div>
+                </div>
+                <div className="card-body">
+                  <div className="news-list">
+                    <div className="news-item">
+                      ETF projections use price trend, momentum, moving averages, and
+                      historical volatility instead of company earnings and valuation
+                      multiples.
+                    </div>
+                    <div className="news-item">
+                      This makes the ETF analysis more appropriate for index funds and
+                      diversified baskets where EPS-based fair value is less useful.
+                    </div>
+                    <div className="news-item">
+                      The bull, base, and bear cases represent different return regimes
+                      rather than changes in company fundamentals.
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
+            )}
 
             <div className="card span-6">
               <div className="card-header">

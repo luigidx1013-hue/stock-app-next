@@ -352,6 +352,23 @@ function getRecentSeries(series, count = 3) {
     .slice(-count);
 }
 
+function buildProjectionBands({ monthlyPath, latestPrice, volatility }) {
+  const vol = clamp(safeNumber(volatility) ?? 0.25, 0.05, 1.0);
+  const bandScale = 0.18;
+
+  return monthlyPath.map((point, index) => {
+    const t = index + 1;
+    const width = latestPrice * vol * Math.sqrt(t / 12) * bandScale;
+
+    return {
+      month: point.month,
+      base: point.price,
+      low: Number(Math.max(0, point.price - width).toFixed(2)),
+      high: Number((point.price + width).toFixed(2)),
+    };
+  });
+}
+
 function projectScenarioPrices({
   ticker,
   latestPrice,
@@ -379,6 +396,7 @@ function projectScenarioPrices({
       projections: [],
       monthlyPath: [],
       fairValues: null,
+      projectionBands: [],
     };
   }
 
@@ -442,26 +460,13 @@ function projectScenarioPrices({
       }))
     : [];
 
-const vol = clamp(safeNumber(volatility) ?? 0.25, 0.05, 1.0);
+  const projectionBands = buildProjectionBands({
+    monthlyPath,
+    latestPrice,
+    volatility,
+  });
 
-// confidence band width scaling (tune this later if needed)
-const bandScale = 0.18;
-
-const projectionBands = monthlyPath.map((point, index) => {
-  const t = index + 1;
-
-  // width grows over time (very important)
-  const width = latestPrice * vol * Math.sqrt(t / 12) * bandScale;
-
-  return {
-    month: point.month,
-    base: point.price,
-    low: Number(Math.max(0, point.price - width).toFixed(2)),
-    high: Number((point.price + width).toFixed(2)),
-  };
-});
-
-  const uncertainty = clamp(vol * 0.35, 0.03, 0.10);
+  const uncertainty = clamp(volatility * 0.35, 0.03, 0.1);
 
   return {
     forwardEPS: Number(forwardEPS.toFixed(2)),
@@ -483,7 +488,7 @@ const projectionBands = monthlyPath.map((point, index) => {
   };
 }
 
-function buildProjection({ ticker, prices, fundamentals, news }) {
+function getPriceStats(prices, news = []) {
   const closes = prices.map((p) => p.close).filter((x) => x !== null);
   if (closes.length < 200) throw new Error("Not enough price history.");
 
@@ -511,6 +516,33 @@ function buildProjection({ ticker, prices, fundamentals, news }) {
   const newsScores = news.map((n) => n.sentimentScore);
   const avgNewsSentiment = newsScores.length ? mean(newsScores) : 0;
   const newsAdjustment = clamp(avgNewsSentiment * 0.01, -0.03, 0.03);
+
+  let annualDrift =
+    threeYearCagr * 0.4 +
+    clamp(oneYearReturn, -0.3, 0.3) * 0.25 +
+    clamp(trendSignal * 2, -0.15, 0.15) * 0.2 +
+    newsAdjustment * 0.15;
+
+  annualDrift -= clamp((annualVol - 0.25) * 0.25, 0, 0.1);
+  annualDrift = clamp(annualDrift, -0.12, 0.22);
+
+  return {
+    closes,
+    latestPrice,
+    oneYearReturn,
+    threeYearCagr,
+    annualVol,
+    ma50,
+    ma200,
+    trendSignal,
+    avgNewsSentiment,
+    newsAdjustment,
+    annualDrift,
+  };
+}
+
+function buildProjection({ ticker, prices, fundamentals, news }) {
+  const stats = getPriceStats(prices, news);
 
   const epsSeries = (fundamentals.eps || []).filter((x) => x.val !== null);
   const recentEps = epsSeries.length ? epsSeries[epsSeries.length - 1].val : null;
@@ -558,17 +590,8 @@ function buildProjection({ ticker, prices, fundamentals, news }) {
 
   let trailingPE = null;
   if (recentEps && recentEps > 0) {
-    trailingPE = latestPrice / recentEps;
+    trailingPE = stats.latestPrice / recentEps;
   }
-
-  let annualDrift =
-    threeYearCagr * 0.4 +
-    clamp(oneYearReturn, -0.3, 0.3) * 0.25 +
-    clamp(trendSignal * 2, -0.15, 0.15) * 0.2 +
-    newsAdjustment * 0.15;
-
-  annualDrift -= clamp((annualVol - 0.25) * 0.25, 0, 0.1);
-  annualDrift = clamp(annualDrift, -0.12, 0.22);
 
   let forwardPE = trailingPE;
   if (!forwardPE || !Number.isFinite(forwardPE) || forwardPE <= 0) {
@@ -576,46 +599,142 @@ function buildProjection({ ticker, prices, fundamentals, news }) {
   }
 
   forwardPE = clamp(forwardPE, 8, 35);
-  forwardPE *= 1 + clamp(newsAdjustment + trendSignal * 0.2, -0.1, 0.1);
+  forwardPE *= 1 + clamp(stats.newsAdjustment + stats.trendSignal * 0.2, -0.1, 0.1);
   forwardPE = clamp(forwardPE, 8, 38);
 
   const scenarioModel = projectScenarioPrices({
     ticker,
-    latestPrice,
+    latestPrice: stats.latestPrice,
     recentEps,
     forwardPE,
-    annualDrift,
-    volatility: annualVol,
+    annualDrift: stats.annualDrift,
+    volatility: stats.annualVol,
     epsGrowth,
     revenueGrowth,
-    avgNewsSentiment,
+    avgNewsSentiment: stats.avgNewsSentiment,
     years: 5,
   });
 
   return {
-  latestPrice: Number(latestPrice.toFixed(2)),
-  ma50: Number(ma50.toFixed(2)),
-  ma200: Number(ma200.toFixed(2)),
-  oneYearReturn: Number((oneYearReturn * 100).toFixed(2)),
-  threeYearCagr: Number((threeYearCagr * 100).toFixed(2)),
-  annualVol: Number((annualVol * 100).toFixed(2)),
-  annualDrift: Number((annualDrift * 100).toFixed(2)),
-  trailingPE: trailingPE ? Number(trailingPE.toFixed(2)) : null,
-  forwardPE: Number(forwardPE.toFixed(2)),
-  epsGrowth: Number((epsGrowth * 100).toFixed(2)),
-  revenueGrowth: Number((revenueGrowth * 100).toFixed(2)),
-  avgNewsSentiment: Number(avgNewsSentiment.toFixed(2)),
-  assumptions: {
-    forwardEPS: scenarioModel.forwardEPS,
-    normalizedGrowth: scenarioModel.normalizedGrowth,
-    scenarioGrowths: scenarioModel.scenarioGrowths,
-    scenarioPEs: scenarioModel.scenarioPEs,
-    fairValues: scenarioModel.fairValues,
-  },
-  projections: scenarioModel.projections,
-  monthlyPath: scenarioModel.monthlyPath,
-  projectionBands: scenarioModel.projectionBands,
-};
+    assetType: "stock",
+    latestPrice: Number(stats.latestPrice.toFixed(2)),
+    ma50: Number(stats.ma50.toFixed(2)),
+    ma200: Number(stats.ma200.toFixed(2)),
+    oneYearReturn: Number((stats.oneYearReturn * 100).toFixed(2)),
+    threeYearCagr: Number((stats.threeYearCagr * 100).toFixed(2)),
+    annualVol: Number((stats.annualVol * 100).toFixed(2)),
+    annualDrift: Number((stats.annualDrift * 100).toFixed(2)),
+    trailingPE: trailingPE ? Number(trailingPE.toFixed(2)) : null,
+    forwardPE: Number(forwardPE.toFixed(2)),
+    epsGrowth: Number((epsGrowth * 100).toFixed(2)),
+    revenueGrowth: Number((revenueGrowth * 100).toFixed(2)),
+    avgNewsSentiment: Number(stats.avgNewsSentiment.toFixed(2)),
+    assumptions: {
+      modelType: "fundamental",
+      forwardEPS: scenarioModel.forwardEPS,
+      normalizedGrowth: scenarioModel.normalizedGrowth,
+      scenarioGrowths: scenarioModel.scenarioGrowths,
+      scenarioPEs: scenarioModel.scenarioPEs,
+      fairValues: scenarioModel.fairValues,
+    },
+    projections: scenarioModel.projections,
+    monthlyPath: scenarioModel.monthlyPath,
+    projectionBands: scenarioModel.projectionBands,
+  };
+}
+
+function buildEtfProjection({ ticker, prices, news }) {
+  const stats = getPriceStats(prices, news);
+
+  const regimeBoost = clamp(stats.trendSignal * 0.6, -0.05, 0.05);
+  const sentimentBoost = clamp(stats.avgNewsSentiment * 0.006, -0.02, 0.02);
+
+  const baseDrift = clamp(
+    stats.threeYearCagr * 0.55 +
+      stats.oneYearReturn * 0.2 +
+      regimeBoost +
+      sentimentBoost,
+    -0.1,
+    0.18
+  );
+
+  const bearDrift = clamp(baseDrift - Math.max(0.04, stats.annualVol * 0.35), -0.18, 0.12);
+  const bullDrift = clamp(baseDrift + Math.max(0.04, stats.annualVol * 0.3), -0.02, 0.24);
+
+  const bearTarget = stats.latestPrice * (1 + bearDrift);
+  const baseTarget = stats.latestPrice * (1 + baseDrift);
+  const bullTarget = stats.latestPrice * (1 + bullDrift);
+
+  const monthlyPath = buildMonthlyPath({
+    ticker,
+    currentPrice: stats.latestPrice,
+    targetPrice: baseTarget,
+    months: 12,
+    annualDrift: baseDrift,
+    annualVolatility: stats.annualVol,
+    meanReversionStrength: 0.22,
+  }).map((point) => ({
+    month: point.month,
+    price: Number(point.price.toFixed(2)),
+  }));
+
+  const projectionBands = buildProjectionBands({
+    monthlyPath,
+    latestPrice: stats.latestPrice,
+    volatility: stats.annualVol,
+  });
+
+  const projections = Array.from({ length: 5 }, (_, index) => {
+    const year = index + 1;
+    const bearPrice = stats.latestPrice * Math.pow(1 + bearDrift, year);
+    const basePrice = stats.latestPrice * Math.pow(1 + baseDrift, year);
+    const bullPrice = stats.latestPrice * Math.pow(1 + bullDrift, year);
+
+    return {
+      year,
+      projectedBearEPS: null,
+      projectedBaseEPS: null,
+      projectedBullEPS: null,
+      bearPrice: Number(bearPrice.toFixed(2)),
+      blendedPrice: Number(basePrice.toFixed(2)),
+      bullPrice: Number(bullPrice.toFixed(2)),
+    };
+  });
+
+  return {
+    assetType: "etf",
+    latestPrice: Number(stats.latestPrice.toFixed(2)),
+    ma50: Number(stats.ma50.toFixed(2)),
+    ma200: Number(stats.ma200.toFixed(2)),
+    oneYearReturn: Number((stats.oneYearReturn * 100).toFixed(2)),
+    threeYearCagr: Number((stats.threeYearCagr * 100).toFixed(2)),
+    annualVol: Number((stats.annualVol * 100).toFixed(2)),
+    annualDrift: Number((baseDrift * 100).toFixed(2)),
+    trailingPE: null,
+    forwardPE: null,
+    epsGrowth: null,
+    revenueGrowth: null,
+    avgNewsSentiment: Number(stats.avgNewsSentiment.toFixed(2)),
+    assumptions: {
+      modelType: "trend",
+      forwardEPS: null,
+      normalizedGrowth: null,
+      scenarioGrowths: {
+        bearGrowth: Number((bearDrift * 100).toFixed(2)),
+        baseGrowth: Number((baseDrift * 100).toFixed(2)),
+        bullGrowth: Number((bullDrift * 100).toFixed(2)),
+      },
+      scenarioPEs: null,
+      fairValues: {
+        bear: Number(bearTarget.toFixed(2)),
+        base: Number(baseTarget.toFixed(2)),
+        bull: Number(bullTarget.toFixed(2)),
+      },
+    },
+    projections,
+    monthlyPath,
+    projectionBands,
+  };
 }
 
 export async function GET(_request, context) {
@@ -628,20 +747,57 @@ export async function GET(_request, context) {
     }
 
     const prices = await fetchStooqHistory(cleanTicker);
-    const fundamentals = await fetchSecFundamentals(cleanTicker);
-    const news = await fetchNews(cleanTicker, fundamentals.companyName);
 
-    const model = buildProjection({
-      ticker: cleanTicker,
-      prices,
-      fundamentals,
-      news,
-    });
+    let fundamentals = null;
+    let assetType = "stock";
+    let companyName = cleanTicker;
+    let exchange = null;
+
+    try {
+      fundamentals = await fetchSecFundamentals(cleanTicker);
+
+      const hasUsefulFundamentals =
+        (fundamentals?.eps?.length || 0) > 0 || (fundamentals?.revenue?.length || 0) > 0;
+
+      if (!hasUsefulFundamentals) {
+        assetType = "etf";
+      } else {
+        companyName = fundamentals.companyName || cleanTicker;
+        exchange = fundamentals.exchange || null;
+      }
+    } catch (_err) {
+      assetType = "etf";
+      fundamentals = {
+        companyName: cleanTicker,
+        exchange: null,
+        cik: null,
+        revenue: [],
+        netIncome: [],
+        eps: [],
+      };
+    }
+
+    const news = await fetchNews(cleanTicker, companyName);
+
+    const model =
+      assetType === "stock"
+        ? buildProjection({
+            ticker: cleanTicker,
+            prices,
+            fundamentals,
+            news,
+          })
+        : buildEtfProjection({
+            ticker: cleanTicker,
+            prices,
+            news,
+          });
 
     return Response.json({
       ticker: cleanTicker,
-      companyName: fundamentals.companyName,
-      exchange: fundamentals.exchange,
+      assetType: model.assetType,
+      companyName,
+      exchange,
       prices: prices.slice(-600),
       fundamentals,
       news,

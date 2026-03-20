@@ -3,10 +3,10 @@ import AnalyzerClient from "@/components/AnalyzerClient";
 
 export default function AnalyzerPage() {
   return (
-    <div className="container">
-      <Suspense fallback={<div>Loading analyzer...</div>}>
+    <section className="page-section">
+      <Suspense fallback={<div className="page-loading">Loading analyzer...</div>}>
         <AnalyzerClient />
       </Suspense>
-    </div>
+    </section>
   );
 }

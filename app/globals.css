@@ -61,6 +61,7 @@ canvas {
 main.main-area {
   min-width: 0;
   width: 100%;
+  max-width: 100%;
   padding-top: var(--topbar-height);
 }
 
@@ -973,6 +974,8 @@ th {
   main.main-area {
     padding-top: 0;
     margin-left: var(--sidebar-width);
+    width: calc(100% - var(--sidebar-width));
+    max-width: calc(100% - var(--sidebar-width));
   }
 
   .page-shell {

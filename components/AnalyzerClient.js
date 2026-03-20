@@ -79,6 +79,13 @@ function FactRows({ rows, formatter = (x) => x }) {
   );
 }
 
+function riskClass(label) {
+  if (label === "Low") return "good";
+  if (label === "Moderate") return "warn";
+  if (label === "High" || label === "Very High") return "bad";
+  return "";
+}
+
 export default function AnalyzerClient() {
   const searchParams = useSearchParams();
 
@@ -101,7 +108,9 @@ export default function AnalyzerClient() {
   const normalizedGrowth = model?.assumptions?.normalizedGrowth ?? null;
   const scenarioPEs = model?.assumptions?.scenarioPEs || null;
   const scenarioGrowths = model?.assumptions?.scenarioGrowths || null;
-  const modelType = model?.assumptions?.modelType || (isEtf ? "trend" : "fundamental");
+  const confidence = model?.confidence || null;
+  const riskLabel = model?.riskLabel || "—";
+  const investmentTake = model?.investmentTake || "";
 
   const baseUpside = useMemo(() => {
     if (!fairValues?.base || !model?.latestPrice) return null;
@@ -253,7 +262,7 @@ export default function AnalyzerClient() {
             value={ticker}
             onChange={(e) => setTicker(e.target.value.toUpperCase())}
             onKeyDown={(e) => e.key === "Enter" && runAnalysis(ticker)}
-            placeholder="Enter ticker (AAPL, JPM, SPY, QQQ)"
+            placeholder="Enter ticker (AAPL, NVDA, SPY, QQQ)"
           />
           <button onClick={() => runAnalysis(ticker)} disabled={loading}>
             {loading ? "Analyzing..." : "Analyze Ticker"}
@@ -332,24 +341,29 @@ export default function AnalyzerClient() {
 
                   <div className="stat">
                     <div className="stat-label">
-                      {isEtf ? "Model Type" : "Forward P/E Used"}
-                      <InfoTooltip
-                        text={
-                          isEtf
-                            ? "ETFs use a price trend and volatility model rather than an EPS/P-E valuation model."
-                            : "Valuation multiple applied to projected earnings to estimate fair value."
-                        }
-                      />
+                      Confidence Score
+                      <InfoTooltip text="A simple 1 to 10 conviction score based on trend, return profile, volatility, and signal agreement." />
                     </div>
                     <div className="stat-value">
-                      {isEtf
-                        ? "Trend"
-                        : model.forwardPE != null
-                        ? model.forwardPE.toFixed(2)
-                        : "—"}
+                      {confidence ? `${confidence.score}/10` : "—"}
                     </div>
                   </div>
                 </div>
+
+                {investmentTake ? (
+                  <div
+                    className="news-item"
+                    style={{
+                      marginTop: "16px",
+                      background: "rgba(255,255,255,0.035)",
+                    }}
+                  >
+                    <strong style={{ display: "block", marginBottom: "6px" }}>
+                      Investment Take
+                    </strong>
+                    {investmentTake}
+                  </div>
+                ) : null}
 
                 <div
                   style={{
@@ -451,6 +465,24 @@ export default function AnalyzerClient() {
                       <InfoTooltip text="Historical annualized volatility estimate. Higher means larger price swings." />
                     </div>
                     <div className="stat-value">{fmtPercent(model.annualVol)}</div>
+                  </div>
+
+                  <div className="stat">
+                    <div className="stat-label">
+                      Risk Level
+                      <InfoTooltip text="A quick risk label derived mainly from annualized volatility." />
+                    </div>
+                    <div className={`stat-value ${riskClass(riskLabel)}`}>{riskLabel}</div>
+                  </div>
+
+                  <div className="stat">
+                    <div className="stat-label">
+                      Confidence Band
+                      <InfoTooltip text="A simplified confidence label based on the overall confidence score." />
+                    </div>
+                    <div className="stat-value">
+                      {confidence?.label || "—"}
+                    </div>
                   </div>
 
                   {!isEtf ? (
